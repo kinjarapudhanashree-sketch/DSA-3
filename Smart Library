@@ -1,0 +1,1262 @@
+package smartlibrary;
+
+import java.util.*;
+
+/**
+ * ============================================================================
+ *  SmartLibrary — Intelligent Digital Library Platform
+ * ============================================================================
+ *  An interactive console application for a digital library. Users can search
+ *  keywords, compare documents, assign reviewers, check resource constraints
+ *  and view live usage analytics. All algorithms run behind the scenes.
+ *
+ *  @author  SmartLibrary Team
+ *  @version 1.1  (case-insensitive search fixed)
+ * ============================================================================
+ */
+public final class SmartLibrary {
+
+    /* ========================================================================
+     * APPLICATION STATE
+     * ====================================================================== */
+    private static final Scanner IN = new Scanner(System.in);
+    private static Library library;
+    private static List<String> vocabulary = new ArrayList<>();
+
+    /* ========================================================================
+     * DOMAIN MODEL
+     * ====================================================================== */
+    static final class Document {
+        final int id; final String title, author, text; final int year;
+        Document(int id, String title, String author, int year, String text) {
+            this.id = id; this.title = title; this.author = author;
+            this.year = year; this.text = text;
+        }
+        /** Title + author + body text, joined for search. */
+        String searchable() {
+            return title + " " + author + " " + text;
+        }
+        @Override public String toString() {
+            return String.format("[D%d] %s - %s (%d)", id, title, author, year);
+        }
+    }
+
+    static final class Library {
+        final List<Document> docs = new ArrayList<>();
+        void add(Document d) { docs.add(d); }
+        String corpus() {
+            StringBuilder sb = new StringBuilder();
+            for (Document d : docs) sb.append(d.searchable()).append(" \n ");
+            return sb.toString();
+        }
+        Document byId(int id) {
+            for (Document d : docs) if (d.id == id) return d;
+            return null;
+        }
+    }
+
+    /* ========================================================================
+     * CORE ALGORITHMS
+     * ====================================================================== */
+
+    static int[] kmpLps(String p) {
+        int[] lps = new int[p.length()];
+        int len = 0, i = 1;
+        while (i < p.length()) {
+            if (p.charAt(i) == p.charAt(len)) lps[i++] = ++len;
+            else if (len > 0) len = lps[len - 1];
+            else lps[i++] = 0;
+        }
+        return lps;
+    }
+
+    static List<Integer> kmpSearch(String t, String p) {
+        List<Integer> res = new ArrayList<>();
+        if (p.isEmpty() || p.length() > t.length()) return res;
+        int[] lps = kmpLps(p);
+        int i = 0, j = 0;
+        while (i < t.length()) {
+            if (t.charAt(i) == p.charAt(j)) {
+                i++; j++;
+                if (j == p.length()) { res.add(i - j); j = lps[j - 1]; }
+            } else if (j > 0) j = lps[j - 1];
+            else i++;
+        }
+        return res;
+    }
+
+    static int[] zFunction(String s) {
+        int n = s.length();
+        int[] z = new int[n];
+        int l = 0, r = 0;
+        for (int i = 1; i < n; i++) {
+            if (i < r) z[i] = Math.min(r - i, z[i - l]);
+            while (i + z[i] < n && s.charAt(z[i]) == s.charAt(i + z[i])) z[i]++;
+            if (i + z[i] > r) { l = i; r = i + z[i]; }
+        }
+        return z;
+    }
+
+    static List<Integer> zSearch(String t, String p) {
+        List<Integer> res = new ArrayList<>();
+        if (p.isEmpty()) return res;
+        String s = p + "\u0000" + t;
+        int[] z = zFunction(s);
+        int m = p.length();
+        for (int i = m + 1; i < s.length(); i++) if (z[i] >= m) res.add(i - m - 1);
+        return res;
+    }
+
+    static List<Integer> rabinKarp(String t, String p) {
+        List<Integer> res = new ArrayList<>();
+        int n = t.length(), m = p.length();
+        if (m == 0 || m > n) return res;
+        final long BASE = 256, MOD = 1_000_000_007L;
+        long high = 1;
+        for (int i = 0; i < m - 1; i++) high = high * BASE % MOD;
+        long ph = 0, th = 0;
+        for (int i = 0; i < m; i++) {
+            ph = (ph * BASE + p.charAt(i)) % MOD;
+            th = (th * BASE + t.charAt(i)) % MOD;
+        }
+        for (int i = 0; i <= n - m; i++) {
+            if (ph == th && t.regionMatches(i, p, 0, m)) res.add(i);
+            if (i < n - m)
+                th = (((th - t.charAt(i) * high % MOD + MOD) % MOD) * BASE
+                        + t.charAt(i + m)) % MOD;
+        }
+        return res;
+    }
+
+    static final class AhoCorasick {
+        final List<String> patterns;
+        final List<Map<Character, Integer>> go  = new ArrayList<>();
+        final List<List<Integer>>           out = new ArrayList<>();
+        int[] fail;
+
+        AhoCorasick(List<String> patterns) {
+            this.patterns = patterns;
+            go.add(new HashMap<>()); out.add(new ArrayList<>());
+            for (int idx = 0; idx < patterns.size(); idx++) {
+                String p = patterns.get(idx);
+                if (p.isEmpty()) continue;
+                int node = 0;
+                for (char c : p.toCharArray()) {
+                    Integer nxt = go.get(node).get(c);
+                    if (nxt == null) {
+                        go.add(new HashMap<>()); out.add(new ArrayList<>());
+                        nxt = go.size() - 1;
+                        go.get(node).put(c, nxt);
+                    }
+                    node = nxt;
+                }
+                out.get(node).add(idx);
+            }
+            fail = new int[go.size()];
+            Deque<Integer> q = new ArrayDeque<>();
+            for (int child : go.get(0).values()) { fail[child] = 0; q.add(child); }
+            while (!q.isEmpty()) {
+                int node = q.poll();
+                out.get(node).addAll(out.get(fail[node]));
+                for (Map.Entry<Character, Integer> e : go.get(node).entrySet()) {
+                    char ch = e.getKey(); int nxt = e.getValue();
+                    int f = fail[node];
+                    while (f != 0 && !go.get(f).containsKey(ch)) f = fail[f];
+                    fail[nxt] = go.get(f).getOrDefault(ch, 0);
+                    q.add(nxt);
+                }
+            }
+        }
+
+        Map<String, List<Integer>> search(String text) {
+            Map<String, List<Integer>> hits = new LinkedHashMap<>();
+            for (String p : patterns) hits.put(p, new ArrayList<>());
+            int node = 0;
+            for (int i = 0; i < text.length(); i++) {
+                char c = text.charAt(i);
+                while (node != 0 && !go.get(node).containsKey(c)) node = fail[node];
+                node = go.get(node).getOrDefault(c, 0);
+                for (int pi : out.get(node)) hits.get(patterns.get(pi)).add(i);
+            }
+            return hits;
+        }
+    }
+
+    static int[] suffixArray(String s) {
+        if (s.isEmpty()) return new int[0];
+        int n = s.length();
+        int[] arr = new int[n + 1];
+        int maxC = 0;
+        for (int i = 0; i < n; i++) { arr[i] = s.charAt(i) + 1; maxC = Math.max(maxC, arr[i]); }
+        int[] sa = saIs(arr, maxC);
+        int[] res = new int[n];
+        int j = 0;
+        for (int v : sa) if (v != n) res[j++] = v;
+        return res;
+    }
+
+    private static int[] saIs(int[] s, int upper) {
+        int n = s.length;
+        if (n == 0) return new int[0];
+        if (n == 1) return new int[]{0};
+        if (n == 2) return s[0] < s[1] ? new int[]{0, 1} : new int[]{1, 0};
+
+        boolean[] ls = new boolean[n];
+        for (int i = n - 2; i >= 0; i--)
+            ls[i] = (s[i] == s[i + 1]) ? ls[i + 1] : (s[i] < s[i + 1]);
+
+        int[] sumL = new int[upper + 1], sumS = new int[upper + 1];
+        for (int i = 0; i < n; i++) {
+            if (!ls[i]) sumS[s[i]]++; else sumL[s[i] + 1]++;
+        }
+        for (int i = 0; i <= upper; i++) {
+            sumS[i] += sumL[i];
+            if (i < upper) sumL[i + 1] += sumS[i];
+        }
+
+        int[] sa = new int[n];
+        int[] lmsMap = new int[n + 1]; Arrays.fill(lmsMap, -1);
+        int m = 0;
+        for (int i = 1; i < n; i++) if (!ls[i - 1] && ls[i]) lmsMap[i] = m++;
+        int[] lms = new int[m]; int idx = 0;
+        for (int i = 1; i < n; i++) if (!ls[i - 1] && ls[i]) lms[idx++] = i;
+        induce(s, sa, ls, sumL, sumS, lms);
+
+        if (m > 0) {
+            int[] sortedLms = new int[m]; int c = 0;
+            for (int v : sa) if (v >= 0 && lmsMap[v] != -1) sortedLms[c++] = v;
+            int[] recS = new int[m]; int recUpper = 0;
+            recS[lmsMap[sortedLms[0]]] = 0;
+            for (int i = 1; i < m; i++) {
+                int left = sortedLms[i - 1], right = sortedLms[i];
+                int endL = (lmsMap[left] + 1 < m) ? lms[lmsMap[left] + 1] : n;
+                int endR = (lmsMap[right] + 1 < m) ? lms[lmsMap[right] + 1] : n;
+                boolean same = (endL - left) == (endR - right);
+                if (same) {
+                    while (left < endL) {
+                        if (s[left] != s[right]) { same = false; break; }
+                        left++; right++;
+                    }
+                }
+                if (!same) recUpper++;
+                recS[lmsMap[sortedLms[i]]] = recUpper;
+            }
+            int[] recSa = saIs(recS, recUpper);
+            for (int i = 0; i < m; i++) sortedLms[i] = lms[recSa[i]];
+            induce(s, sa, ls, sumL, sumS, sortedLms);
+        }
+        return sa;
+    }
+
+    private static void induce(int[] s, int[] sa, boolean[] ls,
+                               int[] sumL, int[] sumS, int[] lms) {
+        int n = s.length;
+        Arrays.fill(sa, -1);
+        int[] buf = sumS.clone();
+        for (int d : lms) { if (d == n) continue; sa[buf[s[d]]++] = d; }
+        buf = sumL.clone(); sa[buf[s[n - 1]]++] = n - 1;
+        for (int i = 0; i < n; i++) {
+            int v = sa[i];
+            if (v >= 1 && !ls[v - 1]) sa[buf[s[v - 1]]++] = v - 1;
+        }
+        buf = sumL.clone();
+        for (int i = n - 1; i >= 0; i--) {
+            int v = sa[i];
+            if (v >= 1 && ls[v - 1]) sa[--buf[s[v - 1] + 1]] = v - 1;
+        }
+    }
+
+    static int[] kasaiLcp(String s, int[] sa) {
+        int n = s.length();
+        int[] rank = new int[n];
+        for (int i = 0; i < n; i++) rank[sa[i]] = i;
+        int[] lcp = new int[n]; int h = 0;
+        for (int i = 0; i < n; i++) {
+            int r = rank[i];
+            if (r == 0) { h = 0; continue; }
+            int j = sa[r - 1];
+            while (i + h < n && j + h < n && s.charAt(i + h) == s.charAt(j + h)) h++;
+            lcp[r] = h;
+            if (h > 0) h--;
+        }
+        return lcp;
+    }
+
+    static String[] longestRepeatedSubstring(String s) {
+        if (s.length() < 2) return new String[]{"", "0"};
+        int[] sa = suffixArray(s);
+        int[] lcp = kasaiLcp(s, sa);
+        int best = 0, bi = 0;
+        for (int i = 1; i < lcp.length; i++) if (lcp[i] > best) { best = lcp[i]; bi = i; }
+        if (best == 0) return new String[]{"", "0"};
+        return new String[]{ s.substring(sa[bi], sa[bi] + best), String.valueOf(best) };
+    }
+
+    static final class SuffixAutomaton {
+        final List<Map<Character, Integer>> next   = new ArrayList<>();
+        final List<Integer> link   = new ArrayList<>();
+        final List<Integer> length = new ArrayList<>();
+        final List<Integer> occ    = new ArrayList<>();
+        int last = 0;
+
+        SuffixAutomaton(String s) {
+            next.add(new HashMap<>());
+            link.add(-1); length.add(0); occ.add(0);
+            for (char c : s.toCharArray()) extend(c);
+            countOccurrences();
+        }
+        private void extend(char ch) {
+            int cur = next.size();
+            next.add(new HashMap<>()); link.add(0);
+            length.add(length.get(last) + 1); occ.add(1);
+            int p = last;
+            while (p != -1 && !next.get(p).containsKey(ch)) {
+                next.get(p).put(ch, cur);
+                p = link.get(p);
+            }
+            if (p == -1) link.set(cur, 0);
+            else {
+                int q = next.get(p).get(ch);
+                if (length.get(p) + 1 == length.get(q)) link.set(cur, q);
+                else {
+                    int clone = next.size();
+                    next.add(new HashMap<>(next.get(q)));
+                    link.add(link.get(q));
+                    length.add(length.get(p) + 1);
+                    occ.add(0);
+                    while (p != -1 && next.get(p).getOrDefault(ch, -1) == q) {
+                        next.get(p).put(ch, clone);
+                        p = link.get(p);
+                    }
+                    link.set(q, clone);
+                    link.set(cur, clone);
+                }
+            }
+            last = cur;
+        }
+        private void countOccurrences() {
+            Integer[] order = new Integer[next.size()];
+            for (int i = 0; i < order.length; i++) order[i] = i;
+            Arrays.sort(order, (a, b) -> length.get(b) - length.get(a));
+            for (int v : order) {
+                int p = link.get(v);
+                if (p >= 0) occ.set(p, occ.get(p) + occ.get(v));
+            }
+        }
+        private int walk(String t) {
+            int node = 0;
+            for (char c : t.toCharArray()) {
+                Integer nx = next.get(node).get(c);
+                if (nx == null) return -1;
+                node = nx;
+            }
+            return node;
+        }
+        boolean contains(String t)     { return walk(t) != -1; }
+        int countOccurrences(String t) { int n = walk(t); return n < 0 ? 0 : occ.get(n); }
+        long countDistinct() {
+            long total = 0;
+            for (int v = 1; v < next.size(); v++)
+                total += length.get(v) - length.get(link.get(v));
+            return total;
+        }
+    }
+
+    static int levenshtein(String a, String b) {
+        int n = a.length(), m = b.length();
+        int[] prev = new int[m + 1];
+        for (int j = 0; j <= m; j++) prev[j] = j;
+        for (int i = 1; i <= n; i++) {
+            int[] cur = new int[m + 1]; cur[0] = i;
+            for (int j = 1; j <= m; j++) {
+                int cost = a.charAt(i - 1) == b.charAt(j - 1) ? 0 : 1;
+                cur[j] = Math.min(Math.min(prev[j] + 1, cur[j - 1] + 1),
+                                  prev[j - 1] + cost);
+            }
+            prev = cur;
+        }
+        return prev[m];
+    }
+
+    static int damerauLevenshtein(String a, String b) {
+        int n = a.length(), m = b.length();
+        int maxDist = n + m;
+        int[][] d = new int[n + 2][m + 2];
+        Map<Character, Integer> da = new HashMap<>();
+        for (char c : (a + b).toCharArray()) da.putIfAbsent(c, 0);
+        d[0][0] = maxDist;
+        for (int i = 0; i <= n; i++) { d[i + 1][0] = maxDist; d[i + 1][1] = i; }
+        for (int j = 0; j <= m; j++) { d[0][j + 1] = maxDist; d[1][j + 1] = j; }
+        for (int i = 1; i <= n; i++) {
+            int db = 0;
+            for (int j = 1; j <= m; j++) {
+                int k = da.get(b.charAt(j - 1));
+                int l = db;
+                int cost;
+                if (a.charAt(i - 1) == b.charAt(j - 1)) { cost = 0; db = j; }
+                else cost = 1;
+                d[i + 1][j + 1] = Math.min(
+                        Math.min(d[i][j] + cost,
+                                 Math.min(d[i + 1][j] + 1, d[i][j + 1] + 1)),
+                        d[k][l] + (i - k - 1) + 1 + (j - l - 1));
+            }
+            da.put(a.charAt(i - 1), i);
+        }
+        return d[n + 1][m + 1];
+    }
+
+    static Object[] needlemanWunsch(String a, String b,
+                                    int match, int mismatch, int gap) {
+        int n = a.length(), m = b.length();
+        int[][] dp = new int[n + 1][m + 1];
+        for (int i = 1; i <= n; i++) dp[i][0] = i * gap;
+        for (int j = 1; j <= m; j++) dp[0][j] = j * gap;
+        for (int i = 1; i <= n; i++)
+            for (int j = 1; j <= m; j++) {
+                int s = a.charAt(i - 1) == b.charAt(j - 1) ? match : mismatch;
+                dp[i][j] = Math.max(dp[i - 1][j - 1] + s,
+                          Math.max(dp[i - 1][j] + gap, dp[i][j - 1] + gap));
+            }
+        StringBuilder ra = new StringBuilder(), rb = new StringBuilder();
+        int i = n, j = m;
+        while (i > 0 || j > 0) {
+            if (i > 0 && j > 0 && dp[i][j] == dp[i - 1][j - 1] +
+                (a.charAt(i - 1) == b.charAt(j - 1) ? match : mismatch)) {
+                ra.append(a.charAt(i - 1)); rb.append(b.charAt(j - 1)); i--; j--;
+            } else if (i > 0 && dp[i][j] == dp[i - 1][j] + gap) {
+                ra.append(a.charAt(i - 1)); rb.append('-'); i--;
+            } else {
+                ra.append('-'); rb.append(b.charAt(j - 1)); j--;
+            }
+        }
+        return new Object[]{dp[n][m], ra.reverse().toString(), rb.reverse().toString()};
+    }
+
+    static Object[] smithWaterman(String a, String b,
+                                  int match, int mismatch, int gap) {
+        int n = a.length(), m = b.length();
+        int[][] dp = new int[n + 1][m + 1];
+        int best = 0, bi = 0, bj = 0;
+        for (int i = 1; i <= n; i++)
+            for (int j = 1; j <= m; j++) {
+                int s = a.charAt(i - 1) == b.charAt(j - 1) ? match : mismatch;
+                dp[i][j] = Math.max(0, Math.max(dp[i - 1][j - 1] + s,
+                          Math.max(dp[i - 1][j] + gap, dp[i][j - 1] + gap)));
+                if (dp[i][j] > best) { best = dp[i][j]; bi = i; bj = j; }
+            }
+        StringBuilder ra = new StringBuilder(), rb = new StringBuilder();
+        int i = bi, j = bj;
+        while (i > 0 && j > 0 && dp[i][j] > 0) {
+            int s = a.charAt(i - 1) == b.charAt(j - 1) ? match : mismatch;
+            if (dp[i][j] == dp[i - 1][j - 1] + s) {
+                ra.append(a.charAt(i - 1)); rb.append(b.charAt(j - 1)); i--; j--;
+            } else if (dp[i][j] == dp[i - 1][j] + gap) {
+                ra.append(a.charAt(i - 1)); rb.append('-'); i--;
+            } else {
+                ra.append('-'); rb.append(b.charAt(j - 1)); j--;
+            }
+        }
+        return new Object[]{best, ra.reverse().toString(), rb.reverse().toString()};
+    }
+
+    static Object[] hopcroftKarp(List<List<Integer>> adj, int nL, int nR) {
+        int[] pairU = new int[nL], pairV = new int[nR], dist = new int[nL];
+        Arrays.fill(pairU, -1); Arrays.fill(pairV, -1);
+        int matching = 0;
+        while (true) {
+            Deque<Integer> q = new ArrayDeque<>();
+            for (int u = 0; u < nL; u++) {
+                if (pairU[u] == -1) { dist[u] = 0; q.add(u); }
+                else dist[u] = Integer.MAX_VALUE;
+            }
+            boolean found = false;
+            while (!q.isEmpty()) {
+                int u = q.poll();
+                for (int v : adj.get(u)) {
+                    int w = pairV[v];
+                    if (w == -1) found = true;
+                    else if (dist[w] == Integer.MAX_VALUE) {
+                        dist[w] = dist[u] + 1; q.add(w);
+                    }
+                }
+            }
+            if (!found) break;
+            int[] ptr = new int[nL];
+            for (int u = 0; u < nL; u++)
+                if (pairU[u] == -1 && dfsHk(u, adj, pairU, pairV, dist, ptr))
+                    matching++;
+        }
+        return new Object[]{matching, pairU, pairV};
+    }
+    private static boolean dfsHk(int u, List<List<Integer>> adj, int[] pairU,
+                                 int[] pairV, int[] dist, int[] ptr) {
+        while (ptr[u] < adj.get(u).size()) {
+            int v = adj.get(u).get(ptr[u]++);
+            int w = pairV[v];
+            if (w == -1 || (dist[w] == dist[u] + 1
+                    && dfsHk(w, adj, pairU, pairV, dist, ptr))) {
+                pairU[u] = v; pairV[v] = u;
+                return true;
+            }
+        }
+        dist[u] = Integer.MAX_VALUE;
+        return false;
+    }
+
+    static final class MaxFlow {
+        final int n;
+        final List<List<Integer>> g = new ArrayList<>();
+        final List<Integer> to  = new ArrayList<>();
+        final List<Long>    cap = new ArrayList<>();
+        MaxFlow(int n) { this.n = n; for (int i = 0; i < n; i++) g.add(new ArrayList<>()); }
+        void addEdge(int u, int v, long c) {
+            g.get(u).add(to.size()); to.add(v); cap.add(c);
+            g.get(v).add(to.size()); to.add(u); cap.add(0L);
+        }
+        long dinic(int s, int t) {
+            List<Long> c = new ArrayList<>(cap);
+            long flow = 0;
+            while (true) {
+                int[] level = new int[n]; Arrays.fill(level, -1); level[s] = 0;
+                Deque<Integer> q = new ArrayDeque<>(); q.add(s);
+                while (!q.isEmpty()) {
+                    int u = q.poll();
+                    for (int e : g.get(u)) {
+                        int v = to.get(e);
+                        if (c.get(e) > 0 && level[v] < 0) { level[v] = level[u] + 1; q.add(v); }
+                    }
+                }
+                if (level[t] < 0) break;
+                int[] it = new int[n];
+                long pushed;
+                while ((pushed = dfsDinic(s, t, Long.MAX_VALUE, c, level, it)) > 0) flow += pushed;
+            }
+            return flow;
+        }
+        private long dfsDinic(int u, int t, long f, List<Long> c, int[] level, int[] it) {
+            if (u == t) return f;
+            while (it[u] < g.get(u).size()) {
+                int e = g.get(u).get(it[u]);
+                int v = to.get(e);
+                if (c.get(e) > 0 && level[v] == level[u] + 1) {
+                    long d = dfsDinic(v, t, Math.min(f, c.get(e)), c, level, it);
+                    if (d > 0) {
+                        c.set(e, c.get(e) - d);
+                        c.set(e ^ 1, c.get(e ^ 1) + d);
+                        return d;
+                    }
+                }
+                it[u]++;
+            }
+            return 0;
+        }
+    }
+
+    static Map<Integer, Boolean> solveSat(List<List<Integer>> clauses, int numVars) {
+        return dpll(clauses, new HashMap<>(), numVars);
+    }
+    private static Map<Integer, Boolean> dpll(List<List<Integer>> clauses,
+                                              Map<Integer, Boolean> assign, int numVars) {
+        List<List<Integer>> s = simplify(clauses, assign);
+        if (s == null) return null;
+        if (s.isEmpty()) {
+            Map<Integer, Boolean> r = new HashMap<>(assign);
+            for (int v = 1; v <= numVars; v++) r.putIfAbsent(v, false);
+            return r;
+        }
+        for (List<Integer> cl : s)
+            if (cl.size() == 1) {
+                Map<Integer, Boolean> next = new HashMap<>(assign);
+                int lit = cl.get(0); next.put(Math.abs(lit), lit > 0);
+                return dpll(clauses, next, numVars);
+            }
+        Map<Integer, Set<Boolean>> polarity = new HashMap<>();
+        for (List<Integer> cl : s)
+            for (int lit : cl)
+                polarity.computeIfAbsent(Math.abs(lit), k -> new HashSet<>()).add(lit > 0);
+        List<Integer> pures = new ArrayList<>();
+        for (Map.Entry<Integer, Set<Boolean>> e : polarity.entrySet())
+            if (e.getValue().size() == 1) pures.add(e.getKey());
+        if (!pures.isEmpty()) {
+            Map<Integer, Boolean> next = new HashMap<>(assign);
+            for (int v : pures) next.put(v, polarity.get(v).iterator().next());
+            return dpll(clauses, next, numVars);
+        }
+        int var = Math.abs(s.get(0).get(0));
+        for (boolean val : new boolean[]{true, false}) {
+            Map<Integer, Boolean> next = new HashMap<>(assign);
+            next.put(var, val);
+            Map<Integer, Boolean> r = dpll(clauses, next, numVars);
+            if (r != null) return r;
+        }
+        return null;
+    }
+    private static List<List<Integer>> simplify(List<List<Integer>> clauses,
+                                                Map<Integer, Boolean> assign) {
+        List<List<Integer>> out = new ArrayList<>();
+        for (List<Integer> cl : clauses) {
+            boolean sat = false; List<Integer> rem = new ArrayList<>();
+            for (int lit : cl) {
+                int v = Math.abs(lit);
+                if (assign.containsKey(v)) {
+                    boolean val = lit > 0 ? assign.get(v) : !assign.get(v);
+                    if (val) { sat = true; break; }
+                } else rem.add(lit);
+            }
+            if (sat) continue;
+            if (rem.isEmpty()) return null;
+            out.add(rem);
+        }
+        return out;
+    }
+
+    static List<Integer> findClique(int n, List<int[]> edges) {
+        boolean[][] adj = new boolean[n][n];
+        for (int[] e : edges) { adj[e[0]][e[1]] = true; adj[e[1]][e[0]] = true; }
+        List<Integer> best = new ArrayList<>(), current = new ArrayList<>();
+        Set<Integer> cand = new HashSet<>();
+        for (int i = 0; i < n; i++) cand.add(i);
+        expandClique(cand, current, best, adj);
+        return best;
+    }
+    private static void expandClique(Set<Integer> cand, List<Integer> current,
+                                     List<Integer> best, boolean[][] adj) {
+        if (current.size() + cand.size() <= best.size()) return;
+        if (cand.isEmpty()) {
+            if (current.size() > best.size()) { best.clear(); best.addAll(current); }
+            return;
+        }
+        Set<Integer> remaining = new HashSet<>(cand);
+        for (int v : new ArrayList<>(cand)) {
+            remaining.remove(v);
+            if (current.size() + 1 + remaining.size() <= best.size()) return;
+            Set<Integer> next = new HashSet<>();
+            for (int u : remaining) if (adj[v][u]) next.add(u);
+            current.add(v);
+            expandClique(next, current, best, adj);
+            current.remove(current.size() - 1);
+        }
+    }
+
+    static void randomizedQuicksort(long[] a) { qsort(a, 0, a.length - 1, new Random()); }
+    private static void qsort(long[] a, int lo, int hi, Random rng) {
+        while (lo < hi) {
+            int p = rng.nextInt(hi - lo + 1) + lo;
+            long t = a[p]; a[p] = a[hi]; a[hi] = t;
+            int pivot = partition(a, lo, hi);
+            if (pivot - lo < hi - pivot) { qsort(a, lo, pivot - 1, rng); lo = pivot + 1; }
+            else                         { qsort(a, pivot + 1, hi, rng); hi = pivot - 1; }
+        }
+    }
+    private static int partition(long[] a, int lo, int hi) {
+        long pivot = a[hi]; int i = lo - 1;
+        for (int j = lo; j < hi; j++)
+            if (a[j] <= pivot) { i++; long t = a[i]; a[i] = a[j]; a[j] = t; }
+        long t = a[i + 1]; a[i + 1] = a[hi]; a[hi] = t;
+        return i + 1;
+    }
+
+    static int[] reservoirSample(int[] stream, int k, Random rng) {
+        int[] res = new int[Math.min(k, stream.length)];
+        for (int i = 0; i < stream.length; i++) {
+            if (i < k) res[i] = stream[i];
+            else {
+                int j = rng.nextInt(i + 1);
+                if (j < k) res[j] = stream[i];
+            }
+        }
+        return res;
+    }
+
+    static boolean millerRabin(long n, int rounds, Random rng) {
+        if (n < 2) return false;
+        long[] small = {2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37};
+        for (long p : small) if (n % p == 0) return n == p;
+        long d = n - 1; int r = 0;
+        while (d % 2 == 0) { d /= 2; r++; }
+        for (int i = 0; i < rounds; i++) {
+            long a = 2 + Math.floorMod(rng.nextLong(), n - 3);
+            long x = modPow(a, d, n);
+            if (x == 1 || x == n - 1) continue;
+            boolean ok = false;
+            for (int j = 0; j < r - 1; j++) {
+                x = x * x % n;
+                if (x == n - 1) { ok = true; break; }
+            }
+            if (!ok) return false;
+        }
+        return true;
+    }
+    private static long modPow(long b, long e, long m) {
+        long r = 1; b %= m;
+        while (e > 0) {
+            if ((e & 1) == 1) r = r * b % m;
+            b = b * b % m; e >>= 1;
+        }
+        return r;
+    }
+
+    static long[] blellochScan(long[] values) {
+        int n = values.length;
+        if (n == 0) return new long[]{};
+        int size = 1; while (size < n) size <<= 1;
+        long[] a = new long[size];
+        System.arraycopy(values, 0, a, 0, n);
+        for (int d = 1; d < size; d <<= 1) {
+            int step = d << 1;
+            for (int i = step - 1; i < size; i += step) a[i] += a[i - d];
+        }
+        long total = a[size - 1];
+        a[size - 1] = 0;
+        for (int d = size >> 1; d >= 1; d >>= 1) {
+            int step = d << 1;
+            for (int i = step - 1; i < size; i += step) {
+                long t = a[i - d]; a[i - d] = a[i]; a[i] += t;
+            }
+        }
+        long[] res = new long[n + 1];
+        System.arraycopy(a, 0, res, 0, n);
+        res[n] = total;
+        return res;
+    }
+
+    static Object[] parallelReduce(long[] values) {
+        if (values.length == 0) return new Object[]{0L, 0, 0};
+        long[] level = values.clone();
+        int depth = 0, work = 0;
+        while (level.length > 1) {
+            int half = level.length / 2;
+            long[] nxt = new long[(level.length + 1) / 2];
+            for (int i = 0; i < half; i++) { nxt[i] = level[2 * i] + level[2 * i + 1]; work++; }
+            if (level.length % 2 == 1) nxt[half] = level[level.length - 1];
+            level = nxt; depth++;
+        }
+        return new Object[]{level[0], depth, work};
+    }
+
+    static double[] brentTheorem(long work, long span, int processors) {
+        int p = Math.max(1, processors);
+        double t1 = work, tinf = span;
+        double tp = t1 / p + tinf;
+        double speedup = tp > 0 ? t1 / tp : 0;
+        return new double[]{tp, speedup, speedup / p};
+    }
+
+    /* ========================================================================
+     * MENU & USER INPUT HELPERS
+     * ====================================================================== */
+
+    private static void banner() {
+        System.out.println();
+        System.out.println("============================================================");
+        System.out.println("        SmartLibrary - Intelligent Digital Library");
+        System.out.println("============================================================");
+    }
+
+    private static void menu() {
+        System.out.println();
+        System.out.println("---------------------------- MENU ---------------------------");
+        System.out.println("  1. Search for a keyword in the library");
+        System.out.println("  2. Search for multiple keywords at once");
+        System.out.println("  3. Detect a repeated phrase in the corpus");
+        System.out.println("  4. Get spelling suggestions for a query");
+        System.out.println("  5. Compare two documents");
+        System.out.println("  6. View document index information");
+        System.out.println("  7. Assign papers to reviewers");
+        System.out.println("  8. Check library resource constraints");
+        System.out.println("  9. View usage analytics");
+        System.out.println("  10. List all documents");
+        System.out.println("  0. Exit");
+        System.out.println("--------------------------------------------------------------");
+    }
+
+    private static String ask(String prompt) {
+        System.out.print(prompt);
+        System.out.flush();
+        String line = IN.hasNextLine() ? IN.nextLine() : "";
+        return line == null ? "" : line.trim();
+    }
+
+    private static int askInt(String prompt, int min, int max, int def) {
+        while (true) {
+            String s = ask(prompt);
+            if (s.isEmpty()) return def;
+            try {
+                int v = Integer.parseInt(s);
+                if (v >= min && v <= max) return v;
+                System.out.println("  Please enter a number between " + min + " and " + max + ".");
+            } catch (NumberFormatException e) {
+                System.out.println("  That was not a valid number. Try again.");
+            }
+        }
+    }
+
+    /* ========================================================================
+     * FEATURE 1 — KEYWORD SEARCH  (case-insensitive, searches title + author
+     *                              + body text)
+     * ====================================================================== */
+    private static void featureSearchKeyword() {
+        System.out.println();
+        System.out.println(">> Keyword Search");
+        String keyword = ask("   Enter the keyword you want to search: ");
+        if (keyword.isEmpty()) {
+            System.out.println("   Nothing entered. Returning to menu.");
+            return;
+        }
+
+        // Case-insensitive search: lowercase both haystack and needle.
+        String needle = keyword.toLowerCase();
+
+        System.out.println();
+        System.out.println("   Searching for: \"" + keyword + "\"  (case-insensitive)");
+
+        int totalHits = 0;
+        boolean any = false;
+
+        for (Document d : library.docs) {
+            String hay = d.searchable().toLowerCase();
+            List<Integer> hits = kmpSearch(hay, needle);
+            if (!hits.isEmpty()) {
+                any = true;
+                totalHits += hits.size();
+                System.out.println();
+                System.out.println("     - " + d);
+                System.out.println("         " + hits.size()
+                        + " match(es) at positions " + hits);
+                // Show a short context preview for the first hit
+                int p = hits.get(0);
+                int from = Math.max(0, p - 20);
+                int to   = Math.min(d.searchable().length(), p + needle.length() + 20);
+                String preview = d.searchable().substring(from, to)
+                        .replace("\n", " ");
+                System.out.println("         ... " + preview + " ...");
+            }
+        }
+
+        System.out.println();
+        if (any) {
+            System.out.println("   Total matches found: " + totalHits);
+            System.out.println("   Matching documents: " +
+                    countMatchingDocuments(needle));
+        } else {
+            System.out.println("   No document contains that keyword.");
+        }
+    }
+
+    private static int countMatchingDocuments(String needleLower) {
+        int n = 0;
+        for (Document d : library.docs)
+            if (!kmpSearch(d.searchable().toLowerCase(), needleLower).isEmpty()) n++;
+        return n;
+    }
+
+    /* ========================================================================
+     * FEATURE 2 — MULTI-KEYWORD SEARCH  (case-insensitive)
+     * ====================================================================== */
+    private static void featureMultiKeyword() {
+        System.out.println();
+        System.out.println(">> Multi-Keyword Search");
+        System.out.println("   Enter your keywords separated by commas.");
+        System.out.println("   Example: suffix, matching, reviewer");
+        String line = ask("   Keywords: ");
+        if (line.isEmpty()) {
+            System.out.println("   Nothing entered. Returning to menu.");
+            return;
+        }
+        List<String> keywords = new ArrayList<>();
+        List<String> lowered  = new ArrayList<>();
+        for (String s : line.split(",")) {
+            String t = s.trim();
+            if (!t.isEmpty()) {
+                keywords.add(t);
+                lowered.add(t.toLowerCase());
+            }
+        }
+        if (keywords.isEmpty()) {
+            System.out.println("   No valid keywords. Returning to menu.");
+            return;
+        }
+
+        AhoCorasick ac = new AhoCorasick(lowered);
+        Map<String, List<Integer>> hits = ac.search(library.corpus().toLowerCase());
+
+        System.out.println();
+        System.out.println("   Search results (case-insensitive):");
+        for (int i = 0; i < keywords.size(); i++) {
+            int count = hits.get(lowered.get(i)).size();
+            System.out.printf("     - %-25s : %d match(es)%n",
+                    "\"" + keywords.get(i) + "\"", count);
+        }
+    }
+
+    /* ========================================================================
+     * FEATURE 3 — REPEATED PHRASE  (case-insensitive)
+     * ====================================================================== */
+    private static void featureRepeatedPhrase() {
+        System.out.println();
+        System.out.println(">> Repeated Phrase Detection");
+        String phrase = ask("   Enter the phrase to look for: ");
+        if (phrase.isEmpty()) {
+            System.out.println("   Nothing entered. Returning to menu.");
+            return;
+        }
+
+        String needleLower = phrase.toLowerCase();
+        String corpusLower = library.corpus().toLowerCase();
+        List<Integer> positions = zSearch(corpusLower, needleLower);
+
+        System.out.println();
+        System.out.println("   Phrase        : \"" + phrase + "\"  (case-insensitive)");
+        System.out.println("   Occurrences   : " + positions.size());
+        System.out.println("   Repeated      : " + (positions.size() > 1));
+        if (!positions.isEmpty()) {
+            System.out.println("   Positions     : " + positions);
+        }
+        String[] lrs = longestRepeatedSubstring(library.corpus());
+        System.out.println();
+        System.out.println("   Most repeated phrase in the whole library: \"" + lrs[0]
+                + "\" (length " + lrs[1] + ")");
+    }
+
+    /* ========================================================================
+     * FEATURE 4 — SPELLING SUGGESTIONS  (case-insensitive)
+     * ====================================================================== */
+    private static void featureSuggestions() {
+        System.out.println();
+        System.out.println(">> Spelling Suggestions");
+        String query = ask("   Enter your (possibly misspelled) query: ");
+        if (query.isEmpty()) {
+            System.out.println("   Nothing entered. Returning to menu.");
+            return;
+        }
+        String q = query.toLowerCase();
+        List<String[]> scored = new ArrayList<>();
+        for (String w : vocabulary)
+            scored.add(new String[]{
+                    w,
+                    String.valueOf(levenshtein(q, w)),
+                    String.valueOf(damerauLevenshtein(q, w))});
+        scored.sort(Comparator.comparingInt(c -> Integer.parseInt(c[1])));
+        System.out.println();
+        System.out.println("   Did you mean one of these?");
+        int top = Math.min(5, scored.size());
+        for (int i = 0; i < top; i++) {
+            String[] c = scored.get(i);
+            System.out.printf("     %d) %-15s   edit distance = %s%n",
+                    i + 1, c[0], c[1]);
+        }
+    }
+
+    /* ========================================================================
+     * FEATURE 5 — COMPARE TWO DOCUMENTS
+     * ====================================================================== */
+    private static void featureCompareDocuments() {
+        System.out.println();
+        System.out.println(">> Document Comparison");
+        System.out.println("   Available documents:");
+        for (Document d : library.docs) System.out.println("     " + d);
+        int idA = askInt("   Enter the ID of the FIRST document  (1-" + library.docs.size() + "): ",
+                1, library.docs.size(), -1);
+        if (idA < 0) { System.out.println("   Cancelled."); return; }
+        int idB = askInt("   Enter the ID of the SECOND document (1-" + library.docs.size() + "): ",
+                1, library.docs.size(), -1);
+        if (idB < 0) { System.out.println("   Cancelled."); return; }
+
+        Document a = library.byId(idA);
+        Document b = library.byId(idB);
+        if (a == null || b == null) { System.out.println("   Invalid document IDs."); return; }
+
+        String ta = a.text.length() > 60 ? a.text.substring(0, 60) + "..." : a.text;
+        String tb = b.text.length() > 60 ? b.text.substring(0, 60) + "..." : b.text;
+
+        Object[] nw = needlemanWunsch(ta, tb, 2, -1, -2);
+        Object[] sw = smithWaterman(ta, tb, 2, -1, -2);
+
+        System.out.println();
+        System.out.println("   Comparing D" + idA + " with D" + idB);
+        System.out.println("     Global alignment score : " + nw[0]);
+        System.out.println("     Local  alignment score : " + sw[0]);
+        System.out.println();
+        System.out.println("   Global alignment view:");
+        System.out.println("     D" + idA + " : " + nw[1]);
+        System.out.println("     D" + idB + " : " + nw[2]);
+        System.out.println();
+        System.out.println("   Local alignment view:");
+        System.out.println("     D" + idA + " : " + sw[1]);
+        System.out.println("     D" + idB + " : " + sw[2]);
+    }
+
+    /* ========================================================================
+     * FEATURE 6 — INDEX INFORMATION
+     * ====================================================================== */
+    private static void featureIndexInformation() {
+        System.out.println();
+        System.out.println(">> Document Index Information");
+        System.out.println("   Which document would you like to index?");
+        for (Document d : library.docs) System.out.println("     " + d);
+        int id = askInt("   Enter document ID (or 0 for the full corpus): ",
+                0, library.docs.size(), 0);
+
+        String text = (id == 0) ? library.corpus() : library.byId(id).text;
+        System.out.println();
+        System.out.println("   Building suffix index of " + text.length() + " characters...");
+
+        long t0 = System.nanoTime();
+        int[] sa = suffixArray(text);
+        long t1 = System.nanoTime();
+        int[] lcp = kasaiLcp(text, sa);
+        long t2 = System.nanoTime();
+
+        System.out.println("   Suffix array built in " + (t1 - t0) / 1_000_000.0 + " ms");
+        System.out.println("   LCP array   built in " + (t2 - t1) / 1_000_000.0 + " ms");
+        System.out.println();
+        System.out.println("   Longest repeated substring in this text:");
+        String[] lrs = longestRepeatedSubstring(text);
+        System.out.println("       \"" + lrs[0] + "\"  (length " + lrs[1] + ")");
+
+        System.out.println();
+        System.out.println("   Suffix Automaton statistics:");
+        SuffixAutomaton sam = new SuffixAutomaton(text);
+        System.out.println("       automaton states     : " + sam.next.size());
+        System.out.println("       distinct substrings  : " + sam.countDistinct());
+
+        String ans = ask("   Do you want to test a substring? (yes/no): ");
+        if (ans.equalsIgnoreCase("yes") || ans.equalsIgnoreCase("y")) {
+            String probe = ask("   Enter substring: ");
+            if (!probe.isEmpty())
+                System.out.println("       contains(\"" + probe + "\") = " + sam.contains(probe)
+                        + ", occurrences = " + sam.countOccurrences(probe));
+        }
+    }
+
+    /* ========================================================================
+     * FEATURE 7 — REVIEWER ASSIGNMENT
+     * ====================================================================== */
+    private static void featureAssignReviewers() {
+        System.out.println();
+        System.out.println(">> Reviewer Assignment");
+        int nP = askInt("   How many papers do you want to assign? ", 1, 20, 5);
+        int nR = askInt("   How many reviewers are available? ", 1, 20, 4);
+
+        List<List<Integer>> adj = new ArrayList<>();
+        System.out.println();
+        System.out.println("   For each paper, list which reviewers are qualified.");
+        System.out.println("   Enter reviewer IDs separated by commas (0-based).");
+        System.out.println("   Example: 0,2,3    (or blank if none)");
+        for (int p = 0; p < nP; p++) {
+            String line = ask("     Paper " + p + " -> qualified reviewers: ");
+            List<Integer> lst = new ArrayList<>();
+            if (!line.isEmpty()) {
+                for (String s : line.split(",")) {
+                    try {
+                        int r = Integer.parseInt(s.trim());
+                        if (r >= 0 && r < nR && !lst.contains(r)) lst.add(r);
+                    } catch (NumberFormatException ignored) {}
+                }
+            }
+            adj.add(lst);
+        }
+
+        Object[] hk = hopcroftKarp(adj, nP, nR);
+        int[] pairU = (int[]) hk[1];
+
+        System.out.println();
+        System.out.println("   Assignment result:");
+        System.out.println("       maximum matched papers : " + hk[0]);
+        for (int p = 0; p < nP; p++) {
+            String r = pairU[p] == -1 ? "unassigned" : "Reviewer " + pairU[p];
+            System.out.println("       Paper " + p + " -> " + r);
+        }
+
+        String ans = ask("   Do you want to test resource distribution as well? (yes/no): ");
+        if (ans.equalsIgnoreCase("yes") || ans.equalsIgnoreCase("y")) {
+            MaxFlow mf = new MaxFlow(6);
+            mf.addEdge(0, 1, 16); mf.addEdge(0, 2, 13);
+            mf.addEdge(1, 2, 10); mf.addEdge(1, 3, 12);
+            mf.addEdge(2, 1, 4);  mf.addEdge(2, 4, 14);
+            mf.addEdge(3, 2, 9);  mf.addEdge(3, 5, 20);
+            mf.addEdge(4, 3, 7);  mf.addEdge(4, 5, 4);
+            System.out.println("       Max resources that can be distributed : " + mf.dinic(0, 5));
+        }
+    }
+
+    /* ========================================================================
+     * FEATURE 8 — CONSTRAINT CHECK
+     * ====================================================================== */
+    private static void featureConstraints() {
+        System.out.println();
+        System.out.println(">> Library Resource Constraints (SAT check)");
+        System.out.println("   Enter a set of clauses separated by ';'");
+        System.out.println("   Each clause is a list of literals separated by spaces.");
+        System.out.println("   Example: 1 2 3 ; -1 2 -3 ; 1 -2 3");
+        String line = ask("   Clauses: ");
+        if (line.isEmpty()) { System.out.println("   Cancelled."); return; }
+
+        List<List<Integer>> clauses = new ArrayList<>();
+        int maxVar = 0;
+        for (String part : line.split(";")) {
+            List<Integer> cl = new ArrayList<>();
+            for (String tok : part.trim().split("\\s+")) {
+                if (tok.isEmpty()) continue;
+                try {
+                    int lit = Integer.parseInt(tok);
+                    if (lit != 0) {
+                        cl.add(lit);
+                        maxVar = Math.max(maxVar, Math.abs(lit));
+                    }
+                } catch (NumberFormatException ignored) {}
+            }
+            if (!cl.isEmpty()) clauses.add(cl);
+        }
+        if (clauses.isEmpty()) { System.out.println("   No clauses read."); return; }
+
+        Map<Integer, Boolean> model = solveSat(clauses, maxVar);
+        System.out.println();
+        System.out.println("   Clauses parsed     : " + clauses);
+        System.out.println("   Number of vars     : " + maxVar);
+        System.out.println("   Satisfiable        : " + (model != null));
+        if (model != null) System.out.println("   Suggested solution : " + model);
+        else System.out.println("   The given constraints cannot be satisfied together.");
+    }
+
+    /* ========================================================================
+     * FEATURE 9 — USAGE ANALYTICS
+     * ====================================================================== */
+    private static void featureAnalytics() {
+        System.out.println();
+        System.out.println(">> Usage Analytics");
+        int n = askInt("   How many document scores do you want to rank? ", 1, 100, 12);
+
+        Random rng = new Random();
+        long[] scores = new long[n];
+        for (int i = 0; i < n; i++) scores[i] = rng.nextInt(1000) + 1;
+
+        System.out.println();
+        System.out.println("   Raw scores : " + Arrays.toString(scores));
+        randomizedQuicksort(scores);
+        System.out.println("   Ranked     : " + Arrays.toString(scores));
+
+        int[] stream = new int[1000];
+        for (int i = 0; i < stream.length; i++) stream[i] = i;
+        int k = askInt("   How many samples from the usage stream? ", 1, 50, 8);
+        int[] sample = reservoirSample(stream, k, rng);
+        System.out.println("   Random sample from stream : " + Arrays.toString(sample));
+
+        String ans = ask("   Do you want to test big-number identifiers? (yes/no): ");
+        if (ans.equalsIgnoreCase("yes") || ans.equalsIgnoreCase("y")) {
+            System.out.println("       Enter a few integer IDs (blank to finish):");
+            while (true) {
+                String s = ask("       > ");
+                if (s.isEmpty()) break;
+                try {
+                    long v = Long.parseLong(s);
+                    System.out.println("           " + v + " is "
+                            + (millerRabin(v, 20, rng) ? "PRIME" : "not prime"));
+                } catch (NumberFormatException e) {
+                    System.out.println("           Not a valid integer.");
+                }
+            }
+        }
+
+        long[] counts = new long[n];
+        for (int i = 0; i < n; i++) counts[i] = rng.nextInt(50) + 1;
+        long[] pre = blellochScan(counts);
+        Object[] pr = parallelReduce(counts);
+        System.out.println();
+        System.out.println("   Daily counts    : " + Arrays.toString(counts));
+        System.out.println("   Running totals  : " + Arrays.toString(Arrays.copyOf(pre, n)));
+        System.out.println("   Total sum       : " + pre[n] + "   (parallel reduce: " + pr[0] + ")");
+
+        double[] br = brentTheorem(1000, 50, 8);
+        System.out.printf ("   Parallel bound  : T_p <= %.2f,  speed-up %.2fx,  efficiency %.2f%n",
+                br[0], br[1], br[2]);
+    }
+
+    /* ========================================================================
+     * FEATURE 10 — LIST DOCUMENTS
+     * ====================================================================== */
+    private static void featureListDocuments() {
+        System.out.println();
+        System.out.println(">> Document Repository");
+        for (Document d : library.docs) {
+            System.out.println();
+            System.out.println("   " + d);
+            System.out.println("       Text: " + d.text);
+        }
+    }
+
+    /* ========================================================================
+     * CORPUS LOAD
+     * ====================================================================== */
+    private static Library buildCorpus() {
+        Library lib = new Library();
+        lib.add(new Document(1, "Deep Learning for Image Recognition", "Alice Rao", 2021,
+            "Deep learning with convolutional neural networks enables robust image " +
+            "recognition and classification across large digital libraries."));
+        lib.add(new Document(2, "Efficient String Matching in Digital Libraries", "Bikash Mehta", 2020,
+            "String matching algorithms such as kmp rabin karp and aho corasick " +
+            "support keyword search over very large document repositories."));
+        lib.add(new Document(3, "Suffix Structures for Document Similarity", "Chen Li", 2019,
+            "Suffix array suffix automaton and kasai lcp enable document similarity " +
+            "detection and fast substring retrieval in digital libraries."));
+        lib.add(new Document(4, "Network Flow Models for Reviewer Assignment", "Diya Nair", 2022,
+            "Bipartite matching and network flow models assign research papers to " +
+            "qualified reviewers while balancing the review workload."));
+        lib.add(new Document(5, "Approximation Algorithms for Resource Covering", "Eshan Verma", 2018,
+            "Vertex cover clique independent set and approximation algorithms model " +
+            "np complete resource allocation and document conflict problems."));
+        lib.add(new Document(6, "Randomized and Parallel Algorithms for Analytics", "Fatima Khan", 2023,
+            "Randomized quicksort reservoir sampling miller rabin and parallel scan " +
+            "reduce deliver scalable library usage analytics under brent theorem."));
+        return lib;
+    }
+
+    private static void buildVocabulary() {
+        Set<String> words = new TreeSet<>();
+        for (Document d : library.docs) {
+            for (String w : d.searchable().toLowerCase().split("[^a-z]+")) {
+                if (w.length() >= 3) words.add(w);
+            }
+        }
+        vocabulary = new ArrayList<>(words);
+    }
+
+    /* ========================================================================
+     * ENTRY POINT
+     * ====================================================================== */
+    public static void main(String[] args) {
+        library = buildCorpus();
+        buildVocabulary();
+
+        banner();
+        System.out.println();
+        System.out.println("Welcome to SmartLibrary!");
+        System.out.println("A digital library with " + library.docs.size() + " documents is loaded.");
+
+        boolean running = true;
+        while (running) {
+            menu();
+            int choice = askInt("   Please choose an option (0-10): ", 0, 10, -1);
+            switch (choice) {
+                case 1:  featureSearchKeyword();    break;
+                case 2:  featureMultiKeyword();     break;
+                case 3:  featureRepeatedPhrase();   break;
+                case 4:  featureSuggestions();      break;
+                case 5:  featureCompareDocuments(); break;
+                case 6:  featureIndexInformation(); break;
+                case 7:  featureAssignReviewers();  break;
+                case 8:  featureConstraints();      break;
+                case 9:  featureAnalytics();        break;
+                case 10: featureListDocuments();    break;
+                case 0:
+                    running = false;
+                    System.out.println();
+                    System.out.println("Thank you for using SmartLibrary. Goodbye!");
+                    break;
+                default:
+                    System.out.println("   Invalid option. Please choose 0-10.");
+            }
+        }
+        IN.close();
+    }
+}
